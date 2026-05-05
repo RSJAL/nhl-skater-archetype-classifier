@@ -24,6 +24,7 @@ from matplotlib.patches import Polygon as MplPolygon
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
+from sklearn.decomposition import PCA
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier, plot_tree
 from sklearn.model_selection import train_test_split, cross_val_score
@@ -62,6 +63,17 @@ CLUSTER_FEATURES = [
 
 RADAR_STATS  = ["G_60", "A_60", "SOG_60", "xGF_pct_5v5", "BLK_60", "HIT_60", "Fights", "SH_TOI_GP", "PP_TOI_GP", "ES_TOI_GP"]
 RADAR_LABELS = ["G/60", "A/60", "SOG/60", "xGF%", "Blocks/60", "Hits/60", "Fights", "SH TOI/GP", "PP TOI/GP", "ES TOI/GP"]
+
+NOTABLE_F = [
+    "Connor McDavid", "Leon Draisaitl", "Nathan MacKinnon", "Auston Matthews",
+    "Alex Ovechkin", "Sidney Crosby", "Brad Marchand", "Adam Lowry",
+    "Barclay Goodrow", "Andrew Copp", "Alexander Kerfoot",
+]
+NOTABLE_D = [
+    "Cale Makar", "Adam Fox", "Erik Karlsson", "Victor Hedman",
+    "Dougie Hamilton", "Adam Larsson", "Jacob Trouba", "Arber Xhekaj",
+    "Aaron Ekblad", "Brent Burns",
+]
 
 PALETTE = [
     "#4FC3F7", "#81C784", "#CE93D8", "#FFB74D", "#F06292",
@@ -313,6 +325,52 @@ def run_pipeline(df_group, group_name, high_k, stat_labels, bottom_label, file_p
     plt.savefig(radar_path, dpi=150, bbox_inches="tight", facecolor="white")
     plt.close()
     print(f"Saved {radar_path.name}")
+
+    # ── PCA biplot ────────────────────────────────────────────────────────────
+    pca    = PCA(n_components=2, random_state=SEED)
+    coords = pca.fit_transform(X)
+    df_group = df_group.copy()
+    df_group["PC1"] = coords[:, 0]
+    df_group["PC2"] = coords[:, 1]
+
+    fig, ax = plt.subplots(figsize=(12, 9))
+    fig.patch.set_facecolor("white")
+
+    for c in range(high_k):
+        mask  = df_group["Cluster"] == c
+        color = PALETTE[c % len(PALETTE)]
+        ax.scatter(df_group.loc[mask, "PC1"], df_group.loc[mask, "PC2"],
+                   color=color, alpha=0.65, s=45, label=cluster_labels[c], zorder=3)
+
+    notable = NOTABLE_F if file_prefix == "f" else NOTABLE_D
+    for _, row in df_group[df_group["Name"].isin(notable)].iterrows():
+        ax.annotate(row["Name"], (row["PC1"], row["PC2"]),
+                    fontsize=7.5, alpha=0.9, zorder=4,
+                    xytext=(5, 5), textcoords="offset points")
+
+    loadings = pca.components_.T   # (n_features, 2)
+    scale    = 3.0
+    for i, feat in enumerate(CLUSTER_FEATURES):
+        ax.annotate("", xy=(loadings[i, 0]*scale, loadings[i, 1]*scale),
+                    xytext=(0, 0),
+                    arrowprops=dict(arrowstyle="->", color="#555", lw=1.2), zorder=5)
+        ax.text(loadings[i, 0]*scale*1.14, loadings[i, 1]*scale*1.14,
+                feat, fontsize=7, ha="center", va="center",
+                fontweight="bold", color="#333", zorder=5)
+
+    var1, var2 = pca.explained_variance_ratio_ * 100
+    ax.set_xlabel(f"PC1 ({var1:.1f}% variance)", fontsize=12)
+    ax.set_ylabel(f"PC2 ({var2:.1f}% variance)", fontsize=12)
+    ax.set_title(f"NHL {group_name} — PCA Biplot", fontsize=14, fontweight="bold")
+    ax.legend(loc="upper left", fontsize=10, framealpha=0.9)
+    ax.axhline(0, color="#ddd", lw=0.8, ls="--")
+    ax.axvline(0, color="#ddd", lw=0.8, ls="--")
+    ax.grid(True, alpha=0.2)
+    plt.tight_layout()
+    pca_path = HERE / f"pca_biplot_{file_prefix}.png"
+    plt.savefig(pca_path, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close()
+    print(f"Saved {pca_path.name}")
 
     # ── Supervised evaluation — train/test split ──────────────────────────────
     y = df_group["Cluster"].values

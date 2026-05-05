@@ -1,5 +1,8 @@
 raw/
-*.pkl
+km_model_f.pkl
+km_model_d.pkl
+knn_model_f.pkl
+knn_model_d.pkl
 __pycache__/
 *.pyc
 .DS_Store

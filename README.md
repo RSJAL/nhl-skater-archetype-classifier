@@ -56,11 +56,11 @@ Data Collection → K-Means Clustering → KNN + Decision Tree → Radar Visuali
 ### Forward Archetypes
 ![Forward Radar Charts](radar_f_K4.png)
 
-### Forward PCA Biplot
-![Forward PCA Biplot](pca_biplot_f.png)
-
 ### Defensemen Archetypes
 ![Defensemen Radar Charts](radar_d_K4.png)
+
+### Forward PCA Biplot
+![Forward PCA Biplot](pca_biplot_f.png)
 
 ### Defensemen PCA Biplot
 ![Defensemen PCA Biplot](pca_biplot_d.png)

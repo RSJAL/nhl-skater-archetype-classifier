@@ -52,6 +52,12 @@ ARCHETYPE_COLORS = {
     "Two-Way Player":       "#4DB6AC",
 }
 
+def _rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
 # Slot positions: index 0 = centre, 1–6 = neighbours
 _POSITIONS = [
     (0.0,    0.132),   # centre
@@ -185,7 +191,7 @@ def make_neighbour_web(selected_row, neighbours_df, radar_max, radar_floor):
     fig.add_shape(
         type="circle",
         x0=cx - glow_r, y0=cy - glow_r, x1=cx + glow_r, y1=cy + glow_r,
-        fillcolor=f"{sel_color}28",
+        fillcolor=_rgba(sel_color, 0.157),
         line=dict(color=sel_color, width=2),
         xref="x", yref="y",
     )
@@ -220,7 +226,7 @@ def make_neighbour_web(selected_row, neighbours_df, radar_max, radar_floor):
         fig.add_shape(
             type="circle",
             x0=px - node_r, y0=py - node_r, x1=px + node_r, y1=py + node_r,
-            fillcolor=f"{color}1a",
+            fillcolor=_rgba(color, 0.10),
             line=dict(color=color, width=1.5),
             xref="x", yref="y",
         )

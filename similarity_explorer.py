@@ -16,6 +16,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from sklearn.neighbors import NearestNeighbors
 from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 
 HERE = Path(__file__).parent
 
@@ -100,23 +101,27 @@ def load_data():
     df = df.reset_index(drop=True)
     df["Strat_Label"] = df["Group"] + " " + df["Auto_Label"]
 
-    # Normalize each group with its own scaler so distances reflect
-    # relative performance within position, not raw cross-group values.
-    # A combined single scaler skews distances on stats like ES_TOI_GP
-    # where F and D have very different population means.
     scaler_f = joblib.load(HERE / "scaler_f.pkl")
     scaler_d = joblib.load(HERE / "scaler_d.pkl")
-    X_all = np.empty((len(df), len(CLUSTER_FEATURES)))
     f_mask = (df["Group"] == "F").values
     d_mask = (df["Group"] == "D").values
-    X_all[f_mask] = scaler_f.transform(df.loc[f_mask, CLUSTER_FEATURES].values)
-    X_all[d_mask] = scaler_d.transform(df.loc[d_mask, CLUSTER_FEATURES].values)
+
+    # KNN: separate scalers — distance = relative performance within position,
+    # preventing raw stat differences (e.g. D have higher ES_TOI_GP) from
+    # making D players spuriously close to forwards.
+    X_knn = np.empty((len(df), len(CLUSTER_FEATURES)))
+    X_knn[f_mask] = scaler_f.transform(df.loc[f_mask, CLUSTER_FEATURES].values)
+    X_knn[d_mask] = scaler_d.transform(df.loc[d_mask, CLUSTER_FEATURES].values)
+
+    # PCA: single combined scaler — preserves raw positional differences so
+    # F and D separate clearly in the 2D projection.
+    X_pca = StandardScaler().fit_transform(df[CLUSTER_FEATURES].values)
 
     radar_max   = {s: float(np.percentile(df[s].dropna(), 95)) for s in RADAR_STATS}
     radar_floor = {s: float(np.percentile(df[s].dropna(), 5)) if s in RANGE_STATS else 0.0
                    for s in RADAR_STATS}
 
-    return df, X_all, radar_max, radar_floor
+    return df, X_knn, X_pca, radar_max, radar_floor
 
 
 @st.cache_resource
@@ -389,8 +394,8 @@ st.set_page_config(
     layout="wide",
 )
 
-df, X_all, radar_max, radar_floor = load_data()
-nn_all = build_nn(X_all)
+df, X_knn, X_pca, radar_max, radar_floor = load_data()
+nn_all = build_nn(X_knn)
 
 all_names = sorted(df["Name"].tolist())
 f_names   = sorted(df[df["Group"] == "F"]["Name"].tolist())
@@ -468,7 +473,7 @@ with sub_main:
 
 idx      = df[df["Name"] == selected_name].index[0]
 selected = df.loc[idx]
-x_sel    = X_all[idx].reshape(1, -1)
+x_sel    = X_knn[idx].reshape(1, -1)
 
 distances, indices = nn_all.kneighbors(x_sel, n_neighbors=n_neighbours + 25)
 distances, indices = distances[0], indices[0]
@@ -555,7 +560,7 @@ sel_color   = _strat_color(selected)
 cmp_row     = df[df["Name"] == compare_name].iloc[0]
 cmp_color   = _strat_color(cmp_row)
 cmp_idx     = df[df["Name"] == compare_name].index[0]
-dist_to_sel = float(np.linalg.norm(X_all[cmp_idx] - X_all[idx]))
+dist_to_sel = float(np.linalg.norm(X_knn[cmp_idx] - X_knn[idx]))
 
 with col_left:
     def _player_card(row, color, align):
@@ -609,7 +614,7 @@ with col_left:
 
 # ── PCA scatter (combined universe, position-stratified colours) ──────────────
 
-pca_coords, pca_var = compute_pca(X_all)
+pca_coords, pca_var = compute_pca(X_pca)
 
 fig_pca = go.Figure()
 for strat_label, color in ARCHETYPE_COLORS.items():

@@ -16,7 +16,6 @@ import streamlit as st
 import plotly.graph_objects as go
 from sklearn.neighbors import NearestNeighbors
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
 
 HERE = Path(__file__).parent
 
@@ -101,8 +100,17 @@ def load_data():
     df = df.reset_index(drop=True)
     df["Strat_Label"] = df["Group"] + " " + df["Auto_Label"]
 
-    # Combined scaler + feature matrix for cross-position KNN and PCA
-    X_all = StandardScaler().fit_transform(df[CLUSTER_FEATURES].values)
+    # Normalize each group with its own scaler so distances reflect
+    # relative performance within position, not raw cross-group values.
+    # A combined single scaler skews distances on stats like ES_TOI_GP
+    # where F and D have very different population means.
+    scaler_f = joblib.load(HERE / "scaler_f.pkl")
+    scaler_d = joblib.load(HERE / "scaler_d.pkl")
+    X_all = np.empty((len(df), len(CLUSTER_FEATURES)))
+    f_mask = (df["Group"] == "F").values
+    d_mask = (df["Group"] == "D").values
+    X_all[f_mask] = scaler_f.transform(df.loc[f_mask, CLUSTER_FEATURES].values)
+    X_all[d_mask] = scaler_d.transform(df.loc[d_mask, CLUSTER_FEATURES].values)
 
     radar_max   = {s: float(np.percentile(df[s].dropna(), 95)) for s in RADAR_STATS}
     radar_floor = {s: float(np.percentile(df[s].dropna(), 5)) if s in RANGE_STATS else 0.0

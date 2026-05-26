@@ -1,11 +1,11 @@
 """
-app.py — NHL Skater Similarity Explorer
+similarity_explorer.py — NHL Skater Similarity Explorer
 Three panels:
-  1. Neighbour Web  — selected player in the centre, 6 nearest neighbours around it
+  1. Neighbour Web  — selected player in the centre, 6 nearest neighbours (combined F+D KNN)
   2. Comparison     — side-by-side dual stat bars
-  3. PCA Scatter    — archetype projection with neighbour highlights
+  3. PCA Scatter    — combined F+D universe, position-stratified archetype colours
 
-Run with:  streamlit run app.py
+Run with:  streamlit run similarity_explorer.py
 """
 
 from pathlib import Path
@@ -16,6 +16,7 @@ import streamlit as st
 import plotly.graph_objects as go
 from sklearn.neighbors import NearestNeighbors
 from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 
 HERE = Path(__file__).parent
 
@@ -40,74 +41,39 @@ STAT_FORMATS = {
     "Fights": ".0f", "SH_TOI_GP": ".1f", "PP_TOI_GP": ".1f", "ES_TOI_GP": ".1f",
 }
 
-# Stats where 0 is not a meaningful floor — use 5th percentile
 RANGE_STATS = {"xGF_pct_5v5", "ES_TOI_GP", "PP_TOI_GP", "SH_TOI_GP"}
 
+# Position-stratified: F and D share label names but get distinct colours
 ARCHETYPE_COLORS = {
-    "Defensive Forward":    "#81C784",
-    "Producer":             "#CE93D8",
-    "Enforcer":             "#F06292",
-    "Playmaker":            "#4FC3F7",
-    "Defensive Defenseman": "#90A4AE",
-    "Two-Way Player":       "#4DB6AC",
+    "F Defensive Forward":    "#81C784",
+    "F Producer":             "#CE93D8",
+    "F Enforcer":             "#F06292",
+    "F Playmaker":            "#4FC3F7",
+    "D Defensive Defenseman": "#90A4AE",
+    "D Enforcer":             "#FF8A65",
+    "D Playmaker":            "#FFB74D",
+    "D Two-Way Player":       "#4DB6AC",
 }
+
+# Slot positions: index 0 = centre, 1–6 = neighbours
+_POSITIONS = [
+    (0.0,    0.132),
+    (-1.584, 1.386),
+    (0.0,    1.98),
+    (1.584,  1.386),
+    (-1.584, -1.122),
+    (0.0,   -1.716),
+    (1.584,  -1.122),
+]
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _rgba(hex_color: str, alpha: float) -> str:
     h = hex_color.lstrip("#")
     r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
     return f"rgba({r},{g},{b},{alpha})"
 
-
-# Slot positions: index 0 = centre, 1–6 = neighbours
-_POSITIONS = [
-    (0.0,    0.132),   # centre
-    (-1.584, 1.386),   # top-left
-    (0.0,    1.98),    # top-centre
-    (1.584,  1.386),   # top-right
-    (-1.584, -1.122),  # bottom-left
-    (0.0,   -1.716),   # bottom-centre
-    (1.584,  -1.122),  # bottom-right
-]
-
-
-# ── data loading ──────────────────────────────────────────────────────────────
-
-@st.cache_data
-def load_data():
-    df = pd.read_csv(HERE / "players_clustered.csv")
-
-    scaler_f = joblib.load(HERE / "scaler_f.pkl")
-    scaler_d = joblib.load(HERE / "scaler_d.pkl")
-
-    df_f = df[df["Group"] == "F"].copy().reset_index(drop=True)
-    df_d = df[df["Group"] == "D"].copy().reset_index(drop=True)
-
-    X_f = scaler_f.transform(df_f[CLUSTER_FEATURES].values)
-    X_d = scaler_d.transform(df_d[CLUSTER_FEATURES].values)
-
-    radar_max   = {s: float(np.percentile(df[s].dropna(), 95)) for s in RADAR_STATS}
-    radar_floor = {s: float(np.percentile(df[s].dropna(), 5)) if s in RANGE_STATS else 0.0
-                   for s in RADAR_STATS}
-
-    return df_f, df_d, X_f, X_d, radar_max, radar_floor
-
-
-@st.cache_resource
-def build_nn(_X):
-    nn = NearestNeighbors(metric="euclidean")
-    nn.fit(_X)
-    return nn
-
-
-@st.cache_data
-def compute_pca(_X, group: str):
-    pca = PCA(n_components=2, random_state=42)
-    coords = pca.fit_transform(_X)
-    var = pca.explained_variance_ratio_ * 100
-    return coords, var
-
-
-# ── helpers ───────────────────────────────────────────────────────────────────
 
 def _last_name(full_name: str) -> str:
     parts = full_name.split()
@@ -123,9 +89,46 @@ def _norm(val, stat, radar_max, radar_floor):
     return float(np.clip((val - floor) / (ceil - floor), 0.0, 1.0))
 
 
+def _strat_color(row) -> str:
+    return ARCHETYPE_COLORS.get(row["Strat_Label"], "#888888")
+
+
+# ── data loading ──────────────────────────────────────────────────────────────
+
+@st.cache_data
+def load_data():
+    df = pd.read_csv(HERE / "players_clustered.csv")
+    df = df.reset_index(drop=True)
+    df["Strat_Label"] = df["Group"] + " " + df["Auto_Label"]
+
+    # Combined scaler + feature matrix for cross-position KNN and PCA
+    X_all = StandardScaler().fit_transform(df[CLUSTER_FEATURES].values)
+
+    radar_max   = {s: float(np.percentile(df[s].dropna(), 95)) for s in RADAR_STATS}
+    radar_floor = {s: float(np.percentile(df[s].dropna(), 5)) if s in RANGE_STATS else 0.0
+                   for s in RADAR_STATS}
+
+    return df, X_all, radar_max, radar_floor
+
+
+@st.cache_resource
+def build_nn(_X):
+    nn = NearestNeighbors(metric="euclidean")
+    nn.fit(_X)
+    return nn
+
+
+@st.cache_data
+def compute_pca(_X):
+    pca = PCA(n_components=2, random_state=42)
+    coords = pca.fit_transform(_X)
+    var = pca.explained_variance_ratio_ * 100
+    return coords, var
+
+
 # ── neighbour web ─────────────────────────────────────────────────────────────
 
-def make_neighbour_web(selected_row, neighbours_df, radar_max, radar_floor):
+def make_neighbour_web(selected_row, neighbours_df):
     n = min(6, len(neighbours_df))
     BG     = "#0e1117"
     cx, cy = _POSITIONS[0]
@@ -186,7 +189,7 @@ def make_neighbour_web(selected_row, neighbours_df, radar_max, radar_floor):
             )
 
     # Centre node
-    sel_color = ARCHETYPE_COLORS.get(selected_row["Auto_Label"], "#888888")
+    sel_color = _strat_color(selected_row)
     glow_r = 0.72
     fig.add_shape(
         type="circle",
@@ -204,7 +207,7 @@ def make_neighbour_web(selected_row, neighbours_df, radar_max, radar_floor):
     )
     fig.add_annotation(
         x=cx, y=cy - 0.26,
-        text=f"<span style='font-size:9px'>{selected_row.get('Pos','')}</span>",
+        text=f"{selected_row.get('Pos','')} · {selected_row.get('Group','')}",
         showarrow=False,
         font=dict(color="#aaaaaa", size=9),
         xref="x", yref="y", xanchor="center", yanchor="top",
@@ -222,7 +225,7 @@ def make_neighbour_web(selected_row, neighbours_df, radar_max, radar_floor):
     for i in range(n):
         row    = neighbours_df.iloc[i]
         px, py = _POSITIONS[i + 1]
-        color  = ARCHETYPE_COLORS.get(row["Auto_Label"], "#888888")
+        color  = _strat_color(row)
         fig.add_shape(
             type="circle",
             x0=px - node_r, y0=py - node_r, x1=px + node_r, y1=py + node_r,
@@ -239,7 +242,7 @@ def make_neighbour_web(selected_row, neighbours_df, radar_max, radar_floor):
         )
         fig.add_annotation(
             x=px, y=py - 0.22,
-            text=f"<span style='font-size:8px'>{row.get('Pos','')}</span>",
+            text=f"{row.get('Pos','')} · {row.get('Group','')}",
             showarrow=False,
             font=dict(color="#aaaaaa", size=8),
             xref="x", yref="y", xanchor="center", yanchor="top",
@@ -252,20 +255,19 @@ def make_neighbour_web(selected_row, neighbours_df, radar_max, radar_floor):
             xref="x", yref="y", xanchor="center", yanchor="top",
         )
 
-    # Invisible click targets for neighbours
-    click_x = [_POSITIONS[i][0] for i in range(1, n + 1)]
-    click_y = [_POSITIONS[i][1] for i in range(1, n + 1)]
-
+    # Invisible click targets
+    click_x       = [_POSITIONS[i][0] for i in range(1, n + 1)]
+    click_y       = [_POSITIONS[i][1] for i in range(1, n + 1)]
     hover_text    = []
     border_colors = []
     for i in range(n):
         row   = neighbours_df.iloc[i]
-        color = ARCHETYPE_COLORS.get(row["Auto_Label"], "#888888")
+        color = _strat_color(row)
         hover_text.append(
             f"<b><span style='font-size:17px'>{row['Name']}</span></b><br>"
             f"<span style='font-size:12px;color:#aaa'>"
-            f"{row.get('Pos','')} · {row.get('Nationality','')}</span><br>"
-            f"<span style='color:{color}'>{row['Auto_Label']}</span><br>"
+            f"{row.get('Pos','')} · {row.get('Group','')} · {row.get('Nationality','')}</span><br>"
+            f"<span style='color:{color}'>{row['Strat_Label']}</span><br>"
             f"<i>Click to compare</i>"
         )
         border_colors.append(color)
@@ -288,16 +290,12 @@ def make_neighbour_web(selected_row, neighbours_df, radar_max, radar_floor):
     ))
 
     fig.update_layout(
-        paper_bgcolor=BG,
-        plot_bgcolor=BG,
+        paper_bgcolor=BG, plot_bgcolor=BG,
         xaxis=dict(range=[-2.50, 2.50], visible=False, fixedrange=True),
         yaxis=dict(range=[-2.60, 2.75], visible=False, fixedrange=True,
                    scaleanchor="x", scaleratio=1),
         margin=dict(l=0, r=0, t=0, b=0),
-        height=648,
-        showlegend=False,
-        hovermode="closest",
-        dragmode=False,
+        height=648, showlegend=False, hovermode="closest", dragmode=False,
         uirevision=st.session_state.get("_chart_rev", 0),
     )
     return fig
@@ -336,19 +334,18 @@ def make_radar(rows, selected_name, radar_max, radar_floor):
     fig = go.Figure()
     for row in rows:
         is_selected = row["Name"] == selected_name
-        color = ARCHETYPE_COLORS.get(row["Auto_Label"], "#888888")
+        color = _strat_color(row)
         raw   = [float(row[s]) for s in RADAR_STATS]
         norm  = [_norm(v, s, radar_max, radar_floor) for v, s in zip(raw, RADAR_STATS)]
-        norm_closed = norm + [norm[0]]
         hover = (
             f"<b>{row['Name']}</b><br>"
             + "<br>".join(f"{lbl}: {raw[i]:{STAT_FORMATS[s]}}"
                           for i, (lbl, s) in enumerate(zip(RADAR_LABELS, RADAR_STATS)))
-            + f"<br>Archetype: {row['Auto_Label']}"
+            + f"<br>Archetype: {row['Strat_Label']}"
             + "<extra></extra>"
         )
         fig.add_trace(go.Scatterpolar(
-            r=norm_closed, theta=labels_closed,
+            r=norm + [norm[0]], theta=labels_closed,
             fill="toself", fillcolor=color,
             opacity=0.75 if is_selected else 0.18,
             line=dict(color=color, width=3.5 if is_selected else 1.5,
@@ -371,8 +368,7 @@ def make_radar(rows, selected_name, radar_max, radar_floor):
         legend=dict(orientation="h", yanchor="bottom", y=-0.32,
                     xanchor="center", x=0.5, font=dict(size=11)),
         margin=dict(l=70, r=70, t=20, b=110),
-        height=480,
-        paper_bgcolor="white",
+        height=480, paper_bgcolor="white",
     )
     return fig
 
@@ -385,14 +381,17 @@ st.set_page_config(
     layout="wide",
 )
 
-df_f, df_d, X_f, X_d, radar_max, radar_floor = load_data()
-nn_f = build_nn(X_f)
-nn_d = build_nn(X_d)
+df, X_all, radar_max, radar_floor = load_data()
+nn_all = build_nn(X_all)
+
+all_names = sorted(df["Name"].tolist())
+f_names   = sorted(df[df["Group"] == "F"]["Name"].tolist())
+d_names   = sorted(df[df["Group"] == "D"]["Name"].tolist())
 
 st.title("NHL Skater Similarity Explorer")
 st.caption(
-    "Select any player to see their 6 nearest neighbours in stat space. "
-    "Archetypes via K-Means (K=4) · KNN similarity (Euclidean distance) · PCA projection."
+    "Select any player to see their 6 nearest neighbours across the combined F+D universe. "
+    "Archetypes via position-stratified K-Means (K=4 each) · Combined KNN · PCA projection."
 )
 st.divider()
 
@@ -410,36 +409,30 @@ st.markdown(
 with st.sidebar:
     st.header("🏒 NHL Skater Archetypes")
     st.caption(
-        "K-Means clustering on 13 features (2022–23 to 2024–25 regular seasons). "
-        "Forwards and defensemen clustered separately."
+        "K-Means clustering on 13 features (2022–23 to 2024–25). "
+        "Forwards and defensemen clustered separately. "
+        "KNN similarity runs across the combined universe."
     )
     st.divider()
 
-    group      = st.radio("Position group", ["Forwards", "Defensemen"])
-    is_forward = group == "Forwards"
-    df_group   = df_f if is_forward else df_d
-    X_group    = X_f  if is_forward else X_d
-    nn_model   = nn_f if is_forward else nn_d
-
+    group          = st.radio("Filter player list", ["Forwards", "Defensemen"])
     n_neighbours   = st.slider("Neighbours to show", 3, 10, 6)
     same_archetype = st.checkbox("Same-archetype only", value=False)
 
     st.divider()
     st.markdown("**Archetypes**")
-    for archetype in sorted(df_group["Auto_Label"].unique()):
-        color = ARCHETYPE_COLORS.get(archetype, "#888")
+    for strat_label, color in ARCHETYPE_COLORS.items():
         st.markdown(
             f'<span style="display:inline-block;width:12px;height:12px;background:{color};'
             f'border-radius:50%;margin-right:6px;vertical-align:middle"></span>'
-            f'<span style="font-size:13px">{archetype}</span>',
+            f'<span style="font-size:13px">{strat_label}</span>',
             unsafe_allow_html=True,
         )
 
-# ── reset selectors when group changes ───────────────────────────────────────
+# ── reset main selector when group filter changes ─────────────────────────────
 
 if st.session_state.get("_prev_group") != group:
     st.session_state.pop("main_select", None)
-    st.session_state.pop("compare_select", None)
     st.session_state["_prev_group"] = group
 
 # ── resolve pending click ─────────────────────────────────────────────────────
@@ -454,33 +447,33 @@ col_left, col_right = st.columns([1, 1])
 with col_left:
     sub_main, sub_compare = st.columns(2)
 
-default_player = "Connor McDavid" if is_forward else "Cale Makar"
-names          = sorted(df_group["Name"].tolist())
-default_idx    = names.index(default_player) if default_player in names else 0
+selector_names = f_names if group == "Forwards" else d_names
+default_player = "Connor McDavid" if group == "Forwards" else "Cale Makar"
+default_idx    = selector_names.index(default_player) if default_player in selector_names else 0
 
 with sub_main:
     selected_name = st.selectbox(
-        "Choose a player", names, index=default_idx, key="main_select"
+        "Choose a player", selector_names, index=default_idx, key="main_select"
     )
 
-# ── look up selected player + neighbours ──────────────────────────────────────
+# ── look up selected player + neighbours (combined KNN) ───────────────────────
 
-idx      = df_group[df_group["Name"] == selected_name].index[0]
-selected = df_group.loc[idx]
-x_sel    = X_group[idx].reshape(1, -1)
+idx      = df[df["Name"] == selected_name].index[0]
+selected = df.loc[idx]
+x_sel    = X_all[idx].reshape(1, -1)
 
-distances, indices = nn_model.kneighbors(x_sel, n_neighbors=n_neighbours + 25)
+distances, indices = nn_all.kneighbors(x_sel, n_neighbors=n_neighbours + 25)
 distances, indices = distances[0], indices[0]
 
 mask      = indices != idx
 distances = distances[mask]
 indices   = indices[mask]
 
-neighbours_df = df_group.iloc[indices].copy()
+neighbours_df = df.iloc[indices].copy()
 neighbours_df["Distance"] = np.round(distances, 3)
 
 if same_archetype:
-    neighbours_df = neighbours_df[neighbours_df["Auto_Label"] == selected["Auto_Label"]]
+    neighbours_df = neighbours_df[neighbours_df["Strat_Label"] == selected["Strat_Label"]]
 
 neighbours_df = neighbours_df.head(n_neighbours)
 _nb_indices   = neighbours_df.index.tolist()
@@ -491,16 +484,17 @@ neighbours_6  = neighbours_df.head(6).reset_index(drop=True)
 
 @st.dialog("What would you like to do?")
 def neighbour_action_dialog(name):
-    row   = df_group[df_group["Name"] == name].iloc[0]
-    color = ARCHETYPE_COLORS.get(row["Auto_Label"], "#888")
+    row   = df[df["Name"] == name].iloc[0]
+    color = _strat_color(row)
     st.markdown(
-        f'<div style="background:{color}22;border-left:3px solid {color};'
+        f'<div style="background:{_rgba(color, 0.13)};border-left:3px solid {color};'
         f'padding:8px 12px;border-radius:4px;margin-bottom:10px">'
         f'<b style="font-size:16px">{name}</b><br>'
         f'<span style="color:#aaa;font-size:12px">'
-        f'{row.get("Pos","")}&nbsp;·&nbsp;{row.get("Nationality","")}'
+        f'{row.get("Pos","")}&nbsp;·&nbsp;{row.get("Group","")}'
+        f'&nbsp;·&nbsp;{row.get("Nationality","")}'
         f'</span><br>'
-        f'<span style="color:{color};font-size:12px">{row["Auto_Label"]}</span>'
+        f'<span style="color:{color};font-size:12px">{row["Strat_Label"]}</span>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -533,7 +527,7 @@ if "_dialog_player" in st.session_state:
 # ── neighbour web (right column) ──────────────────────────────────────────────
 
 with col_right:
-    fig_web = make_neighbour_web(selected, neighbours_6, radar_max, radar_floor)
+    fig_web = make_neighbour_web(selected, neighbours_6)
     st.plotly_chart(
         fig_web,
         use_container_width=True,
@@ -546,25 +540,25 @@ with col_right:
 
 with sub_compare:
     compare_name = st.selectbox(
-        "Compare with", names, index=0, key="compare_select"
+        "Compare with", all_names, index=0, key="compare_select"
     )
 
-sel_color   = ARCHETYPE_COLORS.get(selected["Auto_Label"], "#888")
-cmp_row     = df_group[df_group["Name"] == compare_name].iloc[0]
-cmp_color   = ARCHETYPE_COLORS.get(cmp_row["Auto_Label"], "#888")
-cmp_idx     = df_group[df_group["Name"] == compare_name].index[0]
-dist_to_sel = float(np.linalg.norm(X_group[cmp_idx] - X_group[idx]))
+sel_color   = _strat_color(selected)
+cmp_row     = df[df["Name"] == compare_name].iloc[0]
+cmp_color   = _strat_color(cmp_row)
+cmp_idx     = df[df["Name"] == compare_name].index[0]
+dist_to_sel = float(np.linalg.norm(X_all[cmp_idx] - X_all[idx]))
 
 with col_left:
     def _player_card(row, color, align):
-        ta = align
         return (
-            f'<div style="flex:1;text-align:{ta}">'
+            f'<div style="flex:1;text-align:{align}">'
             f'  <div style="font-weight:700;font-size:15px;margin-bottom:3px">{row["Name"]}</div>'
             f'  <div style="font-size:12px;color:#aaa;margin-bottom:6px">'
-            f'    {row.get("Pos","")}&nbsp;·&nbsp;{row.get("Nationality","")}'
+            f'    {row.get("Pos","")}&nbsp;·&nbsp;{row.get("Group","")}'
+            f'&nbsp;·&nbsp;{row.get("Nationality","")}'
             f'  </div>'
-            f'  <span style="background:{color}28;border:1px solid {color};'
+            f'  <span style="background:{_rgba(color, 0.16)};border:1px solid {color};'
             f'  padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;color:{color}">'
             f'  {row["Auto_Label"]}</span>'
             f'</div>'
@@ -605,45 +599,46 @@ with col_left:
             unsafe_allow_html=True,
         )
 
-# ── PCA scatter ───────────────────────────────────────────────────────────────
+# ── PCA scatter (combined universe, position-stratified colours) ──────────────
 
-pca_coords, pca_var = compute_pca(X_group, group)
+pca_coords, pca_var = compute_pca(X_all)
 
 fig_pca = go.Figure()
-for archetype, color in ARCHETYPE_COLORS.items():
-    mask = df_group["Auto_Label"] == archetype
+for strat_label, color in ARCHETYPE_COLORS.items():
+    mask   = df["Strat_Label"] == strat_label
     if not mask.any():
         continue
-    sub        = df_group[mask]
+    sub        = df[mask]
     sub_coords = pca_coords[mask]
+    grp        = strat_label[0]
+    symbol     = "circle" if grp == "F" else "square"
     hover = [
         f"<b>{row['Name']}</b><br>"
-        f"{row.get('Pos','')} · {row.get('Nationality','')}<br>"
-        f"Archetype: {row['Auto_Label']}<br>"
+        f"{row.get('Pos','')} · {row.get('Group','')} · {row.get('Nationality','')}<br>"
+        f"Archetype: {row['Strat_Label']}<br>"
         + "<br>".join(f"{lbl}: {row[s]:{STAT_FORMATS[s]}}"
                       for lbl, s in zip(RADAR_LABELS, RADAR_STATS))
         for _, row in sub.iterrows()
     ]
     fig_pca.add_trace(go.Scatter(
         x=sub_coords[:, 0], y=sub_coords[:, 1],
-        mode="markers", name=archetype,
-        marker=dict(color=color, size=6, opacity=0.6, line=dict(width=0)),
+        mode="markers", name=strat_label,
+        marker=dict(color=color, size=7, opacity=0.75,
+                    symbol=symbol, line=dict(width=0)),
         hovertemplate="%{customdata}<extra></extra>",
         customdata=hover,
     ))
 
 nb_coords = pca_coords[_nb_indices]
 nb_hover  = [
-    f"<b>{row['Name']}</b><br>"
-    f"Archetype: {row['Auto_Label']}<br>"
-    f"Distance: {row['Distance']:.3f}"
+    f"<b>{row['Name']}</b><br>{row['Strat_Label']}<br>Distance: {row['Distance']:.3f}"
     for _, row in neighbours_df.iterrows()
 ]
 fig_pca.add_trace(go.Scatter(
     x=nb_coords[:, 0], y=nb_coords[:, 1],
     mode="markers", name="Neighbours",
-    marker=dict(color="white", size=10, opacity=0.9,
-                line=dict(color="white", width=2), symbol="circle-open"),
+    marker=dict(color="white", size=11, opacity=0.9,
+                symbol="circle-open", line=dict(color="white", width=2)),
     hovertemplate="%{customdata}<extra></extra>",
     customdata=nb_hover,
 ))
@@ -654,20 +649,17 @@ fig_pca.add_trace(go.Scatter(
                 line=dict(color="white", width=1.5)),
     text=[selected_name], textposition="top center",
     textfont=dict(color="white", size=12),
-    hovertemplate=(
-        f"<b>{selected_name}</b><br>"
-        f"Archetype: {selected['Auto_Label']}<extra></extra>"
-    ),
+    hovertemplate=f"<b>{selected_name}</b><br>{selected['Strat_Label']}<extra></extra>",
 ))
 fig_pca.update_layout(
     xaxis_title=f"PC1 ({pca_var[0]:.1f}% variance)",
     yaxis_title=f"PC2 ({pca_var[1]:.1f}% variance)",
     paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
     font=dict(color="white"),
-    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=12)),
+    legend=dict(bgcolor="rgba(0,0,0,0)", font=dict(size=11)),
     xaxis=dict(gridcolor="#2a2a3a", zerolinecolor="#2a2a3a"),
     yaxis=dict(gridcolor="#2a2a3a", zerolinecolor="#2a2a3a"),
-    height=560, margin=dict(l=20, r=20, t=20, b=20),
+    height=580, margin=dict(l=20, r=20, t=20, b=20),
     hovermode="closest",
 )
 st.plotly_chart(fig_pca, use_container_width=True)
@@ -677,7 +669,7 @@ st.plotly_chart(fig_pca, use_container_width=True)
 st.divider()
 st.markdown(f"#### {n_neighbours} Nearest Neighbours")
 
-display_cols = ["Name", "Pos", "Auto_Label", "GP",
+display_cols = ["Name", "Group", "Pos", "Auto_Label", "GP",
                 "G_60", "A_60", "SOG_60", "xGF_pct_5v5",
                 "HIT_60", "BLK_60", "Fights", "Distance"]
 display_cols = [c for c in display_cols if c in neighbours_df.columns]
